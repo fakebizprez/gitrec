@@ -1,0 +1,10 @@
+{
+  "name": "gitrec-extension",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/route.test.js tests/selectors.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

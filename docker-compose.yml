@@ -1,0 +1,147 @@
+version: "3"
+services:
+  mysql:
+    image: mysql/mysql-server
+    restart: unless-stopped
+    ports:
+      - 3306:3306
+    command:
+      - '--skip-log-bin'
+    environment:
+      MYSQL_ROOT_PASSWORD: root_pass
+      MYSQL_DATABASE: gorse
+      MYSQL_USER: gorse
+      MYSQL_PASSWORD: gorse_pass
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  worker:
+    image: zhenghaoz/gorse-worker:nightly
+    restart: unless-stopped
+    ports:
+      - 8089:8089
+    command: >
+      --master-host master --master-port 8086 
+      --http-host 0.0.0.0 --http-port 8089
+      --log-path /var/log/gorse/worker.log 
+      --log-max-age 7
+      --cache-path /var/lib/gorse/worker
+    volumes:
+      - ./log/gorse-worker:/var/log/gorse:ro
+      - worker_data:/var/lib/gorse
+    depends_on:
+      - master
+
+  server:
+    image: zhenghaoz/gorse-server:nightly
+    restart: unless-stopped
+    ports:
+      - 8087:8087
+    environment:
+      GORSE_CACHE_STORE: sqla+mysql://gorse:gorse_pass@mysql/gorse
+      GORSE_DATA_STORE: mysql://gorse:gorse_pass@tcp(mysql:3306)/gorse?parseTime=true
+    command: >
+      --master-host master --master-port 8086 
+      --http-host 0.0.0.0 --http-port 8087
+      --log-path /var/log/gorse/server.log 
+      --log-max-age 7
+      --cache-path /var/lib/gorse/server
+    volumes:
+      - ./log/gorse-server:/var/log/gorse
+      - server_data:/var/lib/gorse
+    depends_on:
+      - master
+
+  master:
+    image: zhenghaoz/gorse-master:nightly
+    restart: unless-stopped
+    ports:
+      - 8086:8086
+      - 8088:8088
+    environment:
+      GORSE_CACHE_STORE: mysql://gorse:gorse_pass@tcp(mysql:3306)/gorse?parseTime=true
+      GORSE_DATA_STORE: mysql://gorse:gorse_pass@tcp(mysql:3306)/gorse?parseTime=true
+      GORSE_DASHBOARD_USER_NAME: ${GORSE_DASHBOARD_USER_NAME}
+      GORSE_DASHBOARD_PASSWORD: ${GORSE_DASHBOARD_PASSWORD}
+      GORSE_SERVER_API_KEY: ${GORSE_API_KEY}
+    command: >
+      -c /etc/gorse/config.toml 
+      --log-path /var/log/gorse/master.log 
+      --log-max-age 7
+      --cache-path /var/lib/gorse
+    volumes:
+      - ./config.toml:/etc/gorse/config.toml
+      - ./log/gorse-master:/var/log/gorse
+      - ./lib/gorse-master:/var/lib/gorse
+    depends_on:
+      - mysql
+
+  jobs:
+    build:
+      context: .
+      dockerfile: docker/jobs/Dockerfile
+    restart: unless-stopped
+    environment:
+      GORSE_ADDRESS: http://server:8087
+      GORSE_API_KEY: ${GORSE_API_KEY}
+      BROKER_ADDRESS: sqla+mysql://gorse:gorse_pass@mysql/gorse
+      SQLALCHEMY_DATABASE_URI: mysql://gorse:gorse_pass@mysql:3306/gorse
+      OPENAI_API_BASE: ${OPENAI_API_BASE}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+  cronjobs:
+    build:
+      context: .
+      dockerfile: docker/cronjobs/Dockerfile
+    restart: unless-stopped
+    environment:
+      GORSE_ADDRESS: http://server:8087
+      GORSE_API_KEY: ${GORSE_API_KEY}
+      GITHUB_ACCESS_TOKEN: ${GITHUB_ACCESS_TOKEN}
+      SQLALCHEMY_DATABASE_URI: mysql://gorse:gorse_pass@mysql:3306/gorse
+      OPENAI_API_BASE: ${OPENAI_API_BASE}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+  web:
+    build: 
+      context: .
+      dockerfile: docker/web/Dockerfile
+    restart: unless-stopped
+    ports:
+      - 5000:5000
+    environment:
+      GORSE_ADDRESS: http://server:8087
+      GORSE_API_KEY: ${GORSE_API_KEY}
+      BROKER_ADDRESS: sqla+mysql://gorse:gorse_pass@mysql/gorse
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET}
+      SECRET_KEY: ${SECRET_KEY}
+      SQLALCHEMY_DATABASE_URI: mysql://gorse:gorse_pass@mysql:3306/gorse
+      OPENAI_API_BASE: ${OPENAI_API_BASE}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      FLASK_LOG_PATH: /var/log/web/web.log
+    volumes:
+      - ./log/web:/var/log/web
+
+  backup:
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_DATABASE: gorse
+      MYSQL_USER: gorse
+      MYSQL_PASSWORD: gorse_pass
+      S3_BUCKET: gitrec
+      S3_PREFIX: /mysql
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET_LOCATION: ${S3_BUCKET_LOCATION}
+      S3_HOST_BASE: ${S3_HOST_BASE}
+      S3_HOST_BUCKET: ${S3_HOST_BUCKET}
+
+volumes:
+  mysql_data:
+  worker_data:
+  server_data:
