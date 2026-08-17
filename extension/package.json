@@ -1,6 +1,9 @@
 {
   "name": "gitrec-extension",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "test": "node --test tests/route.test.js tests/selectors.test.js"
   },
