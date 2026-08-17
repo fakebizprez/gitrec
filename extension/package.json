@@ -5,7 +5,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "test": "node --test tests/route.test.js tests/selectors.test.js"
+    "test": "node --test tests/route.test.js tests/selectors.test.js tests/injection.test.js"
   },
   "devDependencies": {
     "jsdom": "^30.0.1"
