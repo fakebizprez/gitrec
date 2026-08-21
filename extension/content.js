@@ -191,6 +191,12 @@ function ensureGitrecCardStyles() {
     }
 }
 
+// Puts the card back if a GitHub re-render moves it out of the sidebar. This
+// only checks that the card is still inside the sidebar, never that it is the
+// sidebar's last child: other extensions -- SimRepo, for one -- observe the
+// same sidebar and re-append their own card whenever it is not last. Two
+// extensions each demanding the last slot move their cards past each other
+// forever inside the microtask queue and lock up the tab.
 function pinSimilarCard(sidebar) {
     if (globalThis.__gitrecSidebarObserver) {
         globalThis.__gitrecSidebarObserver.disconnect();
@@ -198,7 +204,7 @@ function pinSimilarCard(sidebar) {
     }
     const observer = new MutationObserver(function () {
         const card = document.getElementById('similar-repositories');
-        if (card && sidebar.lastElementChild !== card) {
+        if (card && !sidebar.contains(card)) {
             sidebar.appendChild(card);
         }
     });

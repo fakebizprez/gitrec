@@ -180,6 +180,52 @@ describe('loadSimilarRepos', () => {
   });
 });
 
+describe('pinSimilarCard', () => {
+  // Regression: the observer used to re-append the card whenever it was not
+  // the sidebar's last child. SimRepo installs an observer on the same sidebar
+  // with the same rule for its own card, so the two extensions moved their
+  // cards past each other forever and hung the tab.
+  it('does not fight a competing extension for the last slot', async () => {
+    const { window, document } = loadPage();
+    await window.renderSimilarDiv({ repos: [REPO] });
+
+    const sidebar = document.querySelector('.BorderGrid');
+    const rivalCard = document.createElement('div');
+    rivalCard.id = 'rival-card';
+    sidebar.appendChild(rivalCard);
+
+    // The rival caps itself at 50 moves so a regression fails the assertion
+    // instead of starving the microtask queue and hanging the test run.
+    let moves = 0;
+    const rival = new window.MutationObserver(() => {
+      if (moves >= 50) return;
+      if (sidebar.lastElementChild !== rivalCard) {
+        moves += 1;
+        sidebar.appendChild(rivalCard);
+      }
+    });
+    rival.observe(sidebar, { childList: true });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    rival.disconnect();
+    assert.ok(moves <= 1, `the rival extension was forced to move its card ${moves} times`);
+  });
+
+  // Guards the behaviour the pin was added for: when a GitHub re-render lifts
+  // the card out of the sidebar, GitRec still puts it back.
+  it('re-attaches a card an outside re-render moved away', async () => {
+    const { window, document } = loadPage();
+    await window.renderSimilarDiv({ repos: [REPO] });
+
+    const sidebar = document.querySelector('.BorderGrid');
+    const card = document.getElementById('similar-repositories');
+    document.body.appendChild(card);
+
+    await waitFor(() => card.parentElement === sidebar, 'the card to return to the sidebar');
+    assert.equal(card.parentElement, sidebar);
+  });
+});
+
 describe('loadRecommendRepos', () => {
   // Regression: signed out of GitHub there is no user-login meta tag, and the
   // extension asked the GitHub API for /users/undefined/starred.
