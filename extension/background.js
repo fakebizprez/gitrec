@@ -80,8 +80,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.action.onClicked.addListener(() => {
-    let creating = chrome.tabs.create({
+    chrome.tabs.create({
         url: "https://gitrec.gorse.io/"
     });
-    creating.then(onCreated, onError);
 });
