@@ -1,7 +1,39 @@
 var itemId = null;
 var similarOffset = 0;
-var exploreContent = null;
 var loaded = false;
+
+// Repository descriptions, names and languages come from the GitHub API and
+// are written into HTML templates below. They are attacker-controlled -- any
+// account can publish a repository whose description contains markup -- and
+// jQuery runs event handlers such as <img onerror> on append even though
+// $.parseHTML strips <script>. Everything interpolated into a template goes
+// through here first.
+function escapeHtml(value) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Returns a human-readable reason the background worker could not answer, or
+// null when the response is usable. Reading chrome.runtime.lastError here also
+// marks it as handled, which is what keeps "Unchecked runtime.lastError" out of
+// the console when the service worker is restarting.
+function messageError(result) {
+    const failure = chrome.runtime.lastError;
+    if (failure) {
+        return failure.message || 'GitRec is unavailable.';
+    }
+    if (!result) {
+        return 'GitRec is unavailable.';
+    }
+    return result.error || null;
+}
 
 $(document).ready(function () {
     if (globalThis.__gitrecSidebarObserver) {
@@ -16,7 +48,7 @@ $(document).ready(function () {
             const splits = location.pathname.split('/').filter(s => s);
             // mark read
             if (splits.length == 2) {
-                chrome.runtime.sendMessage({ read: itemId }, () => { });
+                chrome.runtime.sendMessage({ read: itemId }, () => { void chrome.runtime.lastError; });
             }
             waitForSidebar().then((sidebar) => {
                 if (sidebar) loadSimilarRepos();
@@ -30,21 +62,32 @@ $(document).ready(function () {
 
 function loadSimilarRepos() {
     chrome.runtime.sendMessage({ neighbors: itemId, offset: similarOffset }, function (result) {
-        if (result.is_authenticated) {
+        const error = messageError(result);
+        if (error) {
+            renderSimilarDiv({ message: error });
+        } else if (result.is_authenticated) {
             renderSimilarDiv(result);
         } else {
             // Fetch repos in client-side
+            const scores = result.scores || [];
             let responses = [];
-            for (const score of result.scores) {
+            for (const score of scores) {
                 const full_name = score.Id.replace(':', '/');
                 responses.push(fetchRepo(full_name));
             }
             Promise.all(responses).then((repos) => {
                 result.repos = repos;
-                for (const [i, score] of result.scores.entries()) {
-                    if (repos[i].full_name) {
-                        result.repos[i].item_id = score.Id;
-                    } else {
+                for (const [i, score] of scores.entries()) {
+                    // Tagged even when the lookup failed: the "repository has
+                    // been removed" branch of renderSimilarDiv reports the item
+                    // back to the server by id, and used to send an undefined
+                    // one because only successful lookups carried it.
+                    result.repos[i].item_id = score.Id;
+                    if (!repos[i].full_name && repos[i].message !== 'Not Found') {
+                        // A missing repository is reported to the server by
+                        // renderSimilarDiv and skipped. Promoting its "Not
+                        // Found" to the card-level message used to replace the
+                        // whole list with that error and skip the cleanup.
                         result.message = repos[i].message;
                     }
                 }
@@ -60,38 +103,41 @@ async function renderSimilarDiv(result) {
     let previous = "";
     let next = "";
     if (result.message) {
-        let errorMessage = "";
-        if (result.message.startsWith('API rate limit exceeded')) {
-            errorMessage = `API rate limit exceeded. Login <a href="https://gitrec.gorse.io" target="_blank">GitRec</a> to get a higher rate limit.`
-        } else {
-            errorMessage = result.message;
-        }
+        // The rate limit notice is our own markup and keeps its link; every
+        // other message is server or GitHub API text, so it is escaped.
+        const errorMessage = String(result.message).startsWith('API rate limit exceeded')
+            ? `API rate limit exceeded. Login <a href="https://gitrec.gorse.io" target="_blank">GitRec</a> to get a higher rate limit.`
+            : escapeHtml(result.message);
         rows = `<div class="text-small color-fg-muted">${errorMessage}</div>`
-    } else if (result.repos.length > 0) {
+    } else if ((result.repos || []).length > 0) {
         for (const repo of result.repos) {
             if (repo.full_name) {
                 if (repo.item_id != repo.full_name.replace('/', ':').toLowerCase()) {
                     // The repository has been renamed.
-                    chrome.runtime.sendMessage({ delete: repo.item_id }, () => { });
+                    chrome.runtime.sendMessage({ delete: repo.item_id }, () => { void chrome.runtime.lastError; });
                 } else if (count < 3) {
                     count++;
                     rows += `
 <div class="py-2 my-2 color-border-muted">
-    <a class="f6 text-bold Link--primary d-flex no-underline wb-break-all d-inline-block" href="/${repo.full_name}">${repo.full_name}</a>
-    <p class="f6 color-fg-muted mb-2" itemprop="description">${repo.description ? repo.description : ''}</p>
+    <a class="f6 text-bold Link--primary d-flex no-underline wb-break-all d-inline-block" href="/${escapeHtml(repo.full_name)}">${escapeHtml(repo.full_name)}</a>
+    <p class="f6 color-fg-muted mb-2" itemprop="description">${escapeHtml(repo.description)}</p>
     ${renderLanguageSpan(repo.language)}
     <span class="f6 color-fg-muted text-normal">
         <svg aria-label="star" role="img" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-star">
             <path fill-rule="evenodd" d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25zm0 2.445L6.615 5.5a.75.75 0 01-.564.41l-3.097.45 2.24 2.184a.75.75 0 01.216.664l-.528 3.084 2.769-1.456a.75.75 0 01.698 0l2.77 1.456-.53-3.084a.75.75 0 01.216-.664l2.24-2.183-3.096-.45a.75.75 0 01-.564-.41L8 2.694v.001z"></path>
         </svg>
-        ${repo.stargazers_count}
+        ${escapeHtml(repo.stargazers_count)}
     </span>
 </div>`
                 }
             } else if (repo.message == 'Not Found') {
                 // The repository has been removed.
-                chrome.runtime.sendMessage({ delete: repo.item_id }, () => { });
+                chrome.runtime.sendMessage({ delete: repo.item_id }, () => { void chrome.runtime.lastError; });
             }
+        }
+        if (!rows) {
+            // Every repository in the batch was renamed or removed.
+            rows = '<div class="text-small color-fg-muted">No similar repositories found</div>';
         }
         // Render previous button
         previous = similarOffset > 0 ?
@@ -104,7 +150,7 @@ async function renderSimilarDiv(result) {
     } else {
         rows = '<div class="text-small color-fg-muted">No similar repositories found</div>'
     }
-    template = `
+    const template = `
 <div id="similar-repositories">
     <h2>Related repositories</h2>
     ${rows}${previous}${next}
@@ -162,35 +208,46 @@ function pinSimilarCard(sidebar) {
 
 function loadRecommendRepos() {
     chrome.runtime.sendMessage({ recommend: [] }, function (result) {
+        const error = messageError(result);
+        if (error) {
+            showRecommend({ message: error });
+            return;
+        }
         if (result.is_authenticated) {
             showRecommend(result);
-        } else {
-            const login = $('meta[name=user-login]').attr('content');
-            fetch(`https://api.github.com/users/${login}/starred?per_page=100`).then(r => r.json()).then(result => {
-                if (result.message) {
-                    showRecommend(result);
-                } else {
-                    let repoNames = result.map((value) => {
-                        return value.full_name.replace('/', ':');
-                    })
-                    chrome.runtime.sendMessage({ recommend: repoNames }, function (scores) {
-                        // Fetch repos in client-side
-                        let responses = [];
-                        for (const score of scores) {
-                            const full_name = score.Id.replace(':', '/');
-                            responses.push(fetchRepo(full_name));
-                        }
-                        Promise.all(responses).then((repos) => {
-                            result.repos = repos;
-                            for (const [i, score] of scores.entries()) {
-                                result.repos[i].item_id = score.Id;
-                            }
-                            showRecommend(result);
-                        })
-                    });
-                }
-            });
+            return;
         }
+        const login = $('meta[name=user-login]').attr('content');
+        if (!login) {
+            // Signed out of GitHub: there are no stars to recommend from, and
+            // /users/undefined/starred would just come back as "Not Found".
+            showRecommend({ message: 'Sign in to GitHub to get recommendations.' });
+            return;
+        }
+        fetch(`https://api.github.com/users/${login}/starred?per_page=100`).then(r => r.json()).then(starred => {
+            if (starred.message) {
+                showRecommend(starred);
+                return;
+            }
+            const repoNames = starred.map((value) => value.full_name.replace('/', ':'));
+            chrome.runtime.sendMessage({ recommend: repoNames }, function (scores) {
+                const scoresError = messageError(scores);
+                if (scoresError || !Array.isArray(scores)) {
+                    showRecommend({ message: scoresError || 'GitRec returned an unexpected response.' });
+                    return;
+                }
+                // Fetch repos in client-side
+                const responses = scores.map((score) => fetchRepo(score.Id.replace(':', '/')));
+                Promise.all(responses).then((repos) => {
+                    for (const [i, score] of scores.entries()) {
+                        repos[i].item_id = score.Id;
+                    }
+                    showRecommend({ is_authenticated: false, repos });
+                })
+            });
+        }).catch((e) => {
+            showRecommend({ message: `Could not reach the GitHub API: ${e.message}` });
+        });
     });
 }
 
@@ -200,26 +257,25 @@ async function showRecommend(result) {
     let template = `
 <div class="mb-3 dashboard-changelog color-bg-default border color-border-muted p-3 rounded-3" aria-label="GitRec">
   <h2 class="f5 text-bold mb-3 width-full dashboard-changelog__title">Explore repositories</h2>`;
+    const repos = result.repos || [];
     if (result.message) {
-        let errorMessage = "";
-        if (result.message.startsWith('API rate limit exceeded')) {
-            errorMessage = `API rate limit exceeded. Login <a href="https://gitrec.gorse.io" target="_blank">GitRec</a> to get a higher rate limit.`
-        } else {
-            errorMessage = result.message;
-        }
+        // As in renderSimilarDiv: only the rate limit notice is our own markup.
+        const errorMessage = String(result.message).startsWith('API rate limit exceeded')
+            ? `API rate limit exceeded. Login <a href="https://gitrec.gorse.io" target="_blank">GitRec</a> to get a higher rate limit.`
+            : escapeHtml(result.message);
         template += `<div class="d-block no-underline f6 mb-3" id="error-message">${errorMessage}</div>`
-    } else if (result.repos.length > 0) {
-        for (const [i, repo] of result.repos.entries()) {
+    } else if (repos.length > 0) {
+        for (const [i, repo] of repos.entries()) {
             template += `
-<div class="py-2 my-2${i == result.repos.length - 1 ? '' : ' border-bottom color-border-muted'}">
-    <a class="f6 text-bold Link--primary d-flex no-underline wb-break-all d-inline-block" href="/${repo.full_name}">${repo.full_name}</a>
-    <p class="f6 color-fg-muted mb-2" itemprop="description">${repo.description ? repo.description : ''}</p>
+<div class="py-2 my-2${i == repos.length - 1 ? '' : ' border-bottom color-border-muted'}">
+    <a class="f6 text-bold Link--primary d-flex no-underline wb-break-all d-inline-block" href="/${escapeHtml(repo.full_name)}">${escapeHtml(repo.full_name)}</a>
+    <p class="f6 color-fg-muted mb-2" itemprop="description">${escapeHtml(repo.description)}</p>
     ${renderLanguageSpan(repo.language)}
     <span class="f6 color-fg-muted text-normal">
         <svg aria-label="star" role="img" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-star">
             <path fill-rule="evenodd" d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25zm0 2.445L6.615 5.5a.75.75 0 01-.564.41l-3.097.45 2.24 2.184a.75.75 0 01.216.664l-.528 3.084 2.769-1.456a.75.75 0 01.698 0l2.77 1.456-.53-3.084a.75.75 0 01.216-.664l2.24-2.183-3.096-.45a.75.75 0 01-.564-.41L8 2.694v.001z"></path>
         </svg>
-    ${repo.stargazers_count}
+    ${escapeHtml(repo.stargazers_count)}
     </span>
 </div>`;
         }
@@ -239,9 +295,14 @@ async function showRecommend(result) {
     exploreDiv.append($($.parseHTML(template)));
     $("a#renew-button").click(function () {
         $("#renew-button").remove();
-        chrome.runtime.sendMessage({ read: result.items }, () => {
-            chrome.runtime.sendMessage({ recommend: [] }, function (result) {
-                showRecommend(result);
+        // An undefined items list used to reach the worker as a message it had
+        // no branch for, so its callback never ran and the next batch never
+        // loaded.
+        chrome.runtime.sendMessage({ read: result.items || [] }, () => {
+            void chrome.runtime.lastError;
+            chrome.runtime.sendMessage({ recommend: [] }, function (next) {
+                const error = messageError(next);
+                showRecommend(error ? { message: error } : next);
             });
         });
         return false;
@@ -249,17 +310,25 @@ async function showRecommend(result) {
 }
 
 async function fetchRepo(name) {
-    let response = await fetch(`https://api.github.com/repos/${name}`);
-    return await response.json();
+    try {
+        const response = await fetch(`https://api.github.com/repos/${name}`);
+        return await response.json();
+    } catch (e) {
+        // Resolved rather than rejected: these run inside a Promise.all, and one
+        // unreachable lookup used to reject the whole batch and render nothing.
+        return { message: e.message };
+    }
 }
 
 function renderLanguageSpan(language) {
     if (language) {
+        // renderLanguageColor only ever returns a hex value from the table in
+        // colors.js, so the colour needs no escaping; the name does.
         return `
 <span class="mr-2 f6 color-fg-muted text-normal">
     <span class="">
         <span class="repo-language-color" style="background-color: ${renderLanguageColor(language)}"></span>
-        <span itemprop="programmingLanguage">${language}</span>
+        <span itemprop="programmingLanguage">${escapeHtml(language)}</span>
     </span>
 </span>`;
     } else {

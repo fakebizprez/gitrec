@@ -11,4 +11,4 @@ package-firefox:
     cd dist/ && zip -m firefox.zip manifest.json
 
 test:
-    cd {{justfile_directory()}} && node --test tests/route.test.js tests/selectors.test.js tests/injection.test.js tests/background.test.js
+    cd {{justfile_directory()}} && node --test tests/route.test.js tests/selectors.test.js tests/injection.test.js tests/background.test.js tests/content.test.js
