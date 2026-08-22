@@ -11,6 +11,13 @@ async function requestJson(path, options) {
     const body = await response.text();
     if (!response.ok) {
         const message = body.trim();
+        // A 5xx status or an HTML body is the server's own failure page, not a
+        // message meant for users; the API crashes with one on, for example, a
+        // neighbors lookup of a repository Gorse has not indexed. Passing it
+        // through put Flask's "Internal Server Error" page inside the sidebar.
+        if (response.status >= 500 || message.startsWith('<')) {
+            return { error: `GitRec is unavailable (HTTP ${response.status}).`, serverError: true };
+        }
         return { error: message || `GitRec request failed with status ${response.status}` };
     }
     try {
@@ -40,7 +47,12 @@ function handleRequest(request) {
         const offset = request.offset || 0;
         return requestJson(
             `/api/v2/neighbors/${request.neighbors}?offset=${offset}&n=3`,
-            { credentials: 'include' });
+            { credentials: 'include' }
+        ).then((result) =>
+            // The server 500s on repositories it has not indexed (only when a
+            // session cookie is attached). The truthful card for that is the
+            // empty state, not an error banner.
+            result && result.serverError ? { is_authenticated: false, scores: [] } : result);
     }
     if (request.recommend) {
         if (Array.isArray(request.recommend) && request.recommend.length > 0) {

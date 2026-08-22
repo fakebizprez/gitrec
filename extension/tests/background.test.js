@@ -161,6 +161,32 @@ describe('background service worker', () => {
       assert.equal(response.error, 'item a:b does not exist');
     });
 
+    // Regression: the server returns its generic 500 page for a neighbors
+    // lookup of a repository Gorse has not indexed (only when a session cookie
+    // is attached), and the card rendered that whole Flask HTML page as its
+    // error message. The truthful state for that failure is the empty card.
+    it('turns a neighbors server error into the empty state, not raw HTML', async () => {
+      const flaskPage = '<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n<h1>Internal Server Error</h1>';
+      const { listeners } = loadServiceWorker({
+        respond: () => ({ status: 500, body: flaskPage }),
+      });
+      const { response, noResponse } = await sendMessage(listeners, { neighbors: 'a:b' });
+      assert.ok(!noResponse, 'the listener must always send a response');
+      assert.equal(response.error, undefined);
+      assert.equal(response.is_authenticated, false);
+      assert.deepEqual([...response.scores], []);
+    });
+
+    it('replaces a server error page on other requests with a short message', async () => {
+      const { listeners } = loadServiceWorker({
+        respond: () => ({ status: 500, body: '<!doctype html><h1>Internal Server Error</h1>' }),
+      });
+      const { response, noResponse } = await sendMessage(listeners, { read: 'a:b' });
+      assert.ok(!noResponse, 'the listener must always send a response');
+      assert.ok(!response.error.includes('<'), 'no HTML may leak into the message');
+      assert.match(response.error, /unavailable/);
+    });
+
     it('reports a non-JSON success body instead of never responding', async () => {
       const { listeners } = loadServiceWorker({
         respond: () => ({ status: 200, body: '<!doctype html><title>Sign in</title>' }),
