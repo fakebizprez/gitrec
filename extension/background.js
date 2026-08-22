@@ -39,7 +39,7 @@ function handleRequest(request) {
         // "undefined" would fail the whole request with a 500.
         const offset = request.offset || 0;
         return requestJson(
-            `/api/v2/neighbors/${request.neighbors}?offset=${offset}&n=6`,
+            `/api/v2/neighbors/${request.neighbors}?offset=${offset}&n=3`,
             { credentials: 'include' });
     }
     if (request.recommend) {

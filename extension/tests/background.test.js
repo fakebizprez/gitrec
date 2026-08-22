@@ -136,7 +136,7 @@ describe('background service worker', () => {
       const { response, returned } = await sendMessage(listeners, { neighbors: 'a:b', offset: 3 });
       assert.equal(returned, true);
       assert.equal(response.is_authenticated, false);
-      assert.equal(fetches[0].url, 'https://gitrec.gorse.io/api/v2/neighbors/a:b?offset=3&n=6');
+      assert.equal(fetches[0].url, 'https://gitrec.gorse.io/api/v2/neighbors/a:b?offset=3&n=3');
     });
 
     // Regression: an absent offset was interpolated as the string "undefined",
@@ -144,7 +144,7 @@ describe('background service worker', () => {
     it('defaults a missing neighbors offset to 0', async () => {
       const { listeners, fetches } = loadServiceWorker();
       await sendMessage(listeners, { neighbors: 'a:b' });
-      assert.equal(fetches[0].url, 'https://gitrec.gorse.io/api/v2/neighbors/a:b?offset=0&n=6');
+      assert.equal(fetches[0].url, 'https://gitrec.gorse.io/api/v2/neighbors/a:b?offset=0&n=3');
     });
 
     // Regression: the API reports failures as a plain-text body (see the

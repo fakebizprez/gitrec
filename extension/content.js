@@ -1,6 +1,15 @@
 var itemId = null;
 var similarOffset = 0;
 var loaded = false;
+// ponytail: per-document caches; add an LRU only if long-lived tabs show measurable memory growth.
+var readItems = globalThis.__gitrecReadItems || new Set();
+var deletedItems = globalThis.__gitrecDeletedItems || new Set();
+var repoRequests = globalThis.__gitrecRepoRequests || new Map();
+var similarRequests = globalThis.__gitrecSimilarRequests || new Map();
+globalThis.__gitrecReadItems = readItems;
+globalThis.__gitrecDeletedItems = deletedItems;
+globalThis.__gitrecRepoRequests = repoRequests;
+globalThis.__gitrecSimilarRequests = similarRequests;
 
 // Repository descriptions, names and languages come from the GitHub API and
 // are written into HTML templates below. They are attacker-controlled -- any
@@ -35,6 +44,14 @@ function messageError(result) {
     return result.error || null;
 }
 
+function deleteRepo(itemId) {
+    if (!itemId || deletedItems.has(itemId)) return;
+    deletedItems.add(itemId);
+    chrome.runtime.sendMessage({ delete: itemId }, function (result) {
+        if (messageError(result)) deletedItems.delete(itemId);
+    });
+}
+
 $(document).ready(function () {
     if (globalThis.__gitrecSidebarObserver) {
         globalThis.__gitrecSidebarObserver.disconnect();
@@ -47,8 +64,12 @@ $(document).ready(function () {
             itemId = info.itemId;
             const splits = location.pathname.split('/').filter(s => s);
             // mark read
-            if (splits.length == 2) {
-                chrome.runtime.sendMessage({ read: itemId }, () => { void chrome.runtime.lastError; });
+            if (splits.length == 2 && !readItems.has(itemId)) {
+                const readItemId = itemId;
+                readItems.add(readItemId);
+                chrome.runtime.sendMessage({ read: readItemId }, function (result) {
+                    if (messageError(result)) readItems.delete(readItemId);
+                });
             }
             waitForSidebar().then((sidebar) => {
                 if (sidebar) loadSimilarRepos();
@@ -61,38 +82,51 @@ $(document).ready(function () {
 })
 
 function loadSimilarRepos() {
-    chrome.runtime.sendMessage({ neighbors: itemId, offset: similarOffset }, function (result) {
-        const error = messageError(result);
-        if (error) {
-            renderSimilarDiv({ message: error });
-        } else if (result.is_authenticated) {
-            renderSimilarDiv(result);
-        } else {
-            // Fetch repos in client-side
-            const scores = result.scores || [];
-            let responses = [];
-            for (const score of scores) {
-                const full_name = score.Id.replace(':', '/');
-                responses.push(fetchRepo(full_name));
-            }
-            Promise.all(responses).then((repos) => {
-                result.repos = repos;
-                for (const [i, score] of scores.entries()) {
-                    // Tagged even when the lookup failed: the "repository has
-                    // been removed" branch of renderSimilarDiv reports the item
-                    // back to the server by id, and used to send an undefined
-                    // one because only successful lookups carried it.
-                    result.repos[i].item_id = score.Id;
-                    if (!repos[i].full_name && repos[i].message !== 'Not Found') {
-                        // A missing repository is reported to the server by
-                        // renderSimilarDiv and skipped. Promoting its "Not
-                        // Found" to the card-level message used to replace the
-                        // whole list with that error and skip the cleanup.
-                        result.message = repos[i].message;
+    const requestedItemId = itemId;
+    const requestedOffset = similarOffset;
+    const requestKey = JSON.stringify([requestedItemId, requestedOffset]);
+    let pending = similarRequests.get(requestKey);
+    if (!pending) {
+        pending = new Promise((resolve) => {
+            chrome.runtime.sendMessage(
+                { neighbors: requestedItemId, offset: requestedOffset },
+                function (result) {
+                    const error = messageError(result);
+                    if (error) {
+                        similarRequests.delete(requestKey);
+                        resolve({ message: error });
+                    } else if (result.is_authenticated) {
+                        resolve(result);
+                    } else {
+                        // Fetch repos in client-side
+                        const scores = result.scores || [];
+                        const responses = scores.map((score) => fetchRepo(score.Id.replace(':', '/')));
+                        Promise.all(responses).then((repos) => {
+                            result.repos = repos;
+                            for (const [i, score] of scores.entries()) {
+                                // Tagged even when the lookup failed: the "repository has
+                                // been removed" branch of renderSimilarDiv reports the item
+                                // back to the server by id, and used to send an undefined
+                                // one because only successful lookups carried it.
+                                result.repos[i].item_id = score.Id;
+                                if (!repos[i].full_name && repos[i].message !== 'Not Found') {
+                                    // A missing repository is reported to the server by
+                                    // renderSimilarDiv and skipped. Promoting its "Not
+                                    // Found" to the card-level message used to replace the
+                                    // whole list with that error and skip the cleanup.
+                                    result.message = repos[i].message;
+                                }
+                            }
+                            resolve(result);
+                        });
                     }
-                }
-                renderSimilarDiv(result);
-            })
+                });
+        });
+        similarRequests.set(requestKey, pending);
+    }
+    pending.then((result) => {
+        if (itemId === requestedItemId && similarOffset === requestedOffset) {
+            renderSimilarDiv(result);
         }
     });
 }
@@ -114,7 +148,7 @@ async function renderSimilarDiv(result) {
             if (repo.full_name) {
                 if (repo.item_id != repo.full_name.replace('/', ':').toLowerCase()) {
                     // The repository has been renamed.
-                    chrome.runtime.sendMessage({ delete: repo.item_id }, () => { void chrome.runtime.lastError; });
+                    deleteRepo(repo.item_id);
                 } else if (count < 3) {
                     count++;
                     rows += `
@@ -132,7 +166,7 @@ async function renderSimilarDiv(result) {
                 }
             } else if (repo.message == 'Not Found') {
                 // The repository has been removed.
-                chrome.runtime.sendMessage({ delete: repo.item_id }, () => { void chrome.runtime.lastError; });
+                deleteRepo(repo.item_id);
             }
         }
         if (!rows) {
@@ -315,15 +349,17 @@ async function showRecommend(result) {
     });
 }
 
-async function fetchRepo(name) {
-    try {
-        const response = await fetch(`https://api.github.com/repos/${name}`);
-        return await response.json();
-    } catch (e) {
-        // Resolved rather than rejected: these run inside a Promise.all, and one
-        // unreachable lookup used to reject the whole batch and render nothing.
-        return { message: e.message };
+function fetchRepo(name) {
+    let pending = repoRequests.get(name);
+    if (!pending) {
+        pending = fetch(`https://api.github.com/repos/${name}`)
+            .then((response) => response.json())
+            // Resolved rather than rejected: these run inside a Promise.all, and one
+            // unreachable lookup used to reject the whole batch and render nothing.
+            .catch((e) => ({ message: e.message }));
+        repoRequests.set(name, pending);
     }
+    return pending;
 }
 
 function renderLanguageSpan(language) {

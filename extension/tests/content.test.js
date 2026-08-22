@@ -14,6 +14,7 @@ const SIDEBAR_HTML = `<!doctype html><html><body>
 // nothing with, so each test drives the function it cares about directly.
 function loadPage(options = {}) {
   const messages = [];
+  const fetches = [];
   const dom = new JSDOM(options.html || SIDEBAR_HTML, {
     runScripts: 'dangerously',
     url: options.url || 'https://github.com/explore',
@@ -24,19 +25,25 @@ function loadPage(options = {}) {
       sendMessage: (request, callback) => {
         messages.push(request);
         const reply = options.reply ? options.reply(request) : {};
-        if (callback) setTimeout(() => callback(reply), 0);
+        if (callback) setTimeout(() => callback(reply), options.replyDelay || 0);
       },
     },
   };
   if (options.fetchResponse) {
-    dom.window.fetch = async () => ({ json: async () => options.fetchResponse() });
+    dom.window.fetch = async (url) => {
+      fetches.push(url);
+      return { json: async () => options.fetchResponse(url) };
+    };
   }
-  for (const file of ['jquery-3.6.1.min.js', 'colors.js', 'selectors.js', 'content.js']) {
-    const script = dom.window.document.createElement('script');
-    script.textContent = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
-    dom.window.document.head.appendChild(script);
-  }
-  return { window: dom.window, document: dom.window.document, messages };
+  const inject = (files) => {
+    for (const file of files) {
+      const script = dom.window.document.createElement('script');
+      script.textContent = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      dom.window.document.head.appendChild(script);
+    }
+  };
+  inject(['jquery-3.6.1.min.js', 'colors.js', 'selectors.js', 'content.js']);
+  return { window: dom.window, document: dom.window.document, messages, fetches, inject };
 }
 
 function waitFor(predicate, description) {
@@ -143,6 +150,47 @@ describe('renderSimilarDiv', () => {
 });
 
 describe('loadSimilarRepos', () => {
+  it('reuses a repository batch across same-repo SPA re-injection', async () => {
+    const scores = ['one:repo', 'two:repo', 'three:repo'].map((Id) => ({ Id }));
+    const page = loadPage({
+      url: 'https://github.com/gorse-io/gorse',
+      reply: (request) => (request.neighbors
+        ? { is_authenticated: false, scores }
+        : {}),
+      fetchResponse: (url) => ({
+        full_name: new URL(url).pathname.replace('/repos/', ''),
+        description: '',
+        language: null,
+        stargazers_count: 0,
+      }),
+      replyDelay: 40,
+    });
+    const count = (field) => page.messages.filter((message) => field in message).length;
+
+    await waitFor(() => count('neighbors') === 1, 'the initial repository batch');
+    assert.equal(count('read'), 1);
+
+    page.window.history.pushState({}, '', '/gorse-io/gorse?tab=readme');
+    page.inject(['selectors.js', 'content.js']);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(count('neighbors'), 1);
+    assert.equal(count('read'), 1);
+    await waitFor(() => page.fetches.length === 3, 'the initial GitHub lookups');
+
+    page.window.history.pushState({}, '', '/gorse-io/gorse?tab=issues');
+    page.inject(['selectors.js', 'content.js']);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(count('neighbors'), 1);
+    assert.equal(page.fetches.length, 3);
+
+    page.window.history.pushState({}, '', '/other/repo');
+    page.inject(['selectors.js', 'content.js']);
+    await waitFor(() => count('neighbors') === 2, 'the changed repository batch');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(page.fetches.length, 3);
+    assert.equal(count('read'), 2);
+  });
+
   it('shows the error the worker reported', async () => {
     const { window, document } = loadPage({ reply: () => ({ error: 'item a:b does not exist' }) });
     window.itemId = 'a:b';
@@ -177,6 +225,10 @@ describe('loadSimilarRepos', () => {
     const deletion = await waitFor(
       () => messages.find((message) => 'delete' in message), 'the cleanup message');
     assert.equal(deletion.delete, 'gone:repo');
+
+    window.loadSimilarRepos();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(messages.filter((message) => 'delete' in message).length, 1);
   });
 });
 
